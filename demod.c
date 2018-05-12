@@ -202,8 +202,8 @@ int main(int argc, char *argv[]) {
         term_color(ANSI_BOLD);
 
         for (i = 0; i < CONSTELLATION_SIZE; i += 2) {
-            cy = output_buffer[i];
-            cx = output_buffer[i+1];
+            cx = output_buffer[i];
+            cy = output_buffer[i+1];
 
             term_char(20 + cy / 8, 36 + cx / 4, '#');
         }
