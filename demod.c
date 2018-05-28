@@ -10,8 +10,8 @@
 #define PLL_BETA            (0.05 * PLL_ALPHA * PLL_ALPHA)
 #define PLL_LOCK_THRESHOLD  25.0
 
-#define TIMING_ALPHA        0.25e-7
-#define TIMING_BETA         1.5e-7
+#define TIMING_ALPHA        0.00025
+#define TIMING_BETA         (0.05 * TIMING_ALPHA * TIMING_ALPHA)
 
 #define INPUT_BUFFER_SIZE           1024
 #define OUTPUT_BUFFER_SIZE          1024
@@ -60,12 +60,10 @@ double make_iir(double cutoff, double sample_rate) {
 }
 
 inline double slice(double x) {
-    if (x < 0.0) {
+    if (x <= 0.0) {
         return -1.0;
-    } else if (x > 0.0) {
-        return 1.0;
     } else {
-        return 0.0;
+        return 1.0;
     }
 }
 
@@ -81,13 +79,13 @@ inline char clamp(int x) {
 
 
 int main(int argc, char *argv[]) {
-    int sample_rate, pll_locked;
+    int sample_rate, pll_locked = 0;
     size_t samples_read, i, j = 0;
 
     double agc_mean = 0.0, agc_coeff, filter_coeff, pll_freq = 0.0, pll_prev_freq = 0.0,
-        pll_phase = 0.0, pll_error, sym_freq = 0.0, sym_phase = 0.0, sym_real, sym_prev_real = 0.0, sym_error;
+        pll_phase = 0.0, pll_error, sym_freq = 0.0, sym_phase = 0.0, sym_real, sym_prev_real = 0.0, sym_error, pll_delta, pll_prev_delta = 0.0;
 
-    double complex input_sample, agc_output, filter_output = 0.0, pll_carrier, pll_output;
+    double complex input_sample, agc_output, pll_carrier, pll_output, filter_output = 0.0, prev_output = 0.0;
 
     char cx, cy;
     float complex input_buffer[INPUT_BUFFER_SIZE];
@@ -117,10 +115,10 @@ int main(int argc, char *argv[]) {
 
     // Calculate the IIR coefficient for automatic gain control and the input filter
     agc_coeff = make_iir(AGC_RATE, sample_rate);
-    filter_coeff = make_iir(SYMBOL_RATE * M_SQRT2 / 2.0, sample_rate);
+    filter_coeff = make_iir(SYMBOL_RATE / 2.0, sample_rate);
 
     // Symbol clock frequency
-    sym_freq = SYMBOL_RATE;
+    sym_freq = SYMBOL_RATE / sample_rate;
 
     while ((samples_read = fread(&input_buffer, sizeof(float complex), INPUT_BUFFER_SIZE, infile))) {
         for (i = 0; i < samples_read; i++) {
@@ -132,12 +130,9 @@ int main(int argc, char *argv[]) {
             // Calculate the AGC output
             agc_output = input_sample / agc_mean / 2.0;
 
-            // Calculate the input filter output
-            filter_output += filter_coeff * (agc_output - filter_output);
-
             // Update the PLL
             pll_carrier = cexp(I * pll_phase);
-            pll_output = filter_output * conj(pll_carrier);
+            pll_output = agc_output * conj(pll_carrier);
             pll_error = carg(pll_output);
             pll_phase += pll_error * PLL_ALPHA;
             pll_freq += pll_error * PLL_BETA;
@@ -145,21 +140,24 @@ int main(int argc, char *argv[]) {
             pll_phase += pll_freq;
             pll_phase = fmod(pll_phase, M_PI * 2.0);
 
-            // Symbol timing recovery and production of output samples (only when the PLL is locked)
-            if (sym_phase > 1.0) {
-                sym_real = creal(pll_output);
+            // Calculate the input filter output
+            filter_output += filter_coeff * (pll_output - filter_output);
 
+            // Symbol timing recovery and production of output samples
+            if (sym_phase >= 1.0) {
+                sym_real = creal(filter_output);
+
+                // Mueller-Muller clock recovery loop
                 sym_error = sym_real * slice(sym_prev_real) - sym_prev_real * slice(sym_real);
-
                 sym_phase += sym_error * TIMING_ALPHA;
                 sym_freq += sym_error * TIMING_BETA;
-                sym_phase = fmod(sym_phase, 1.0);
+                sym_phase -= 1.0;
 
                 sym_prev_real = sym_real;
 
                 // Write the output sample
-                output_buffer[j++] = clamp(creal(pll_output) * 1.5 * 128.0);
-                output_buffer[j++] = clamp(cimag(pll_output) * 1.5 * 128.0);
+                output_buffer[j++] = clamp(creal(prev_output) * 1.5 * 128.0);
+                output_buffer[j++] = clamp(cimag(prev_output) * 1.5 * 128.0);
 
                 // Flush the buffer
                 if (j == OUTPUT_BUFFER_SIZE) {
@@ -174,15 +172,20 @@ int main(int argc, char *argv[]) {
                 }
             }
 
-            sym_phase += sym_freq / sample_rate;
+            sym_phase += sym_freq;
+            prev_output = filter_output;
         }
 
         // Check if the PLL is locked
-        if (fabs(pll_freq - pll_prev_freq) * sample_rate < PLL_LOCK_THRESHOLD) {
+        pll_delta = fabs(pll_freq - pll_prev_freq) * sample_rate;
+
+        if (fabs(pll_delta - pll_prev_delta) < PLL_LOCK_THRESHOLD) {
             pll_locked = 1;
         } else {
             pll_locked = 0;
         }
+
+        pll_prev_delta = pll_delta;
 
         // Render the display
         term_clear();
@@ -192,7 +195,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Meteor-M2 LRPT demodulator");
         term_color(ANSI_NO_COLOR);
         term_goto(2, 0);
-        fprintf(stderr, "Symbol rate: %.5f\n", sym_freq);
+        fprintf(stderr, "Symbol rate: %.5f\n", sym_freq * sample_rate);
         term_goto(3, 0);
         fprintf(stderr, "PLL frequency: ");
         term_color(ANSI_BOLD);
